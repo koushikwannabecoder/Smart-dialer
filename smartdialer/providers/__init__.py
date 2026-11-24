@@ -1,0 +1,1 @@
+"""Contracts for telecom providers."""
