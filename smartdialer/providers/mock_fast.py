@@ -42,8 +42,11 @@ class MockFastProvider:
     def _behavior(self, key: str) -> StartBehavior:
         return self._start_behavior or "accept"
 
+    def _call_script(self, key: str, destination: str) -> tuple[StartBehavior, Timeline]:
+        return self._behavior(key), self.timeline
+
     def start_call(self, attempt_id: UUID, destination: str, key: str) -> ProviderResult:
-        behavior = self._behavior(key)
+        behavior, timeline = self._call_script(key, destination)
         if behavior == "timeout_before":
             return ProviderResult(ProviderOutcome.UNKNOWN)
         now = self._clock()
@@ -65,7 +68,7 @@ class MockFastProvider:
                         VALUES (%s, %s, %s, %s, %s)
                         """,
                         ((self.name, key, event, now + timedelta(seconds=occurs), now + timedelta(seconds=delivery))
-                         for event, occurs, delivery in self.timeline),
+                         for event, occurs, delivery in timeline),
                     )
                 if behavior == "timeout_after":
                     return ProviderResult(ProviderOutcome.UNKNOWN)

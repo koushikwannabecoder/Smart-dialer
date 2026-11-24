@@ -1,6 +1,6 @@
 # Architecture decision record
 
-**Accepted design:** Candidate 1 combines Progressive Dialing, a Predictive Pacing Engine, and an Independent Hard Safety Controller. Phase 4 adds a forecast and audit trail to the existing approval and dispatch path.
+**Accepted design:** Candidate 1 combines Progressive Dialing, a Predictive Pacing Engine, and an Independent Hard Safety Controller. Phase 5 measures both policies and checks actual PostgreSQL allocation contention.
 
 ## Context and alternatives
 
@@ -18,4 +18,8 @@ Unknown outcomes retain ownership at the cost of temporary capacity. Recovery ba
 
 Use a deterministic heuristic over the latest 50 known borrower outcomes within 30 minutes. Below 10 samples, use progressive demand. The 85% utilization target and five-second horizon make the forecast concrete. A 20% denominator floor and 50-request cap limit the response to low observed rates. Unknown calls count in full against forecast demand. These defaults may underfill the team when data is sparse or unstable. Store the inputs and intermediate values so a reviewer can reproduce the requested count. The controller still binds each approved call to a currently eligible agent and borrower.
 
-When progressive mode already fills all safe slots, predictive pacing may deliver the same utilization. The seeded comparison will measure the effect. A reserved agent can still disappear after dispatch. The worker requests cancellation and records an answered call without an agent when that evidence arrives. The reservation guarantee covers database ownership and eligibility when checked. It cannot guarantee physical agent presence throughout a call.
+When progressive mode already fills all safe slots, predictive pacing may deliver the same or lower utilization. The seeded runs hold conditions constant across modes while varying the policies. They use a logical clock and the existing PostgreSQL-backed path so that differences still pass through real reservations, events, and recovery. A separate contention run measures elapsed time and ownership invariants using multiple connections on a disposable PostgreSQL database.
+
+With seed 42 in scenario A, progressive utilization was 76.9% and predictive utilization was 73.2%. Predictive requested 353 starts, 103 of which were approved. The two policies can produce different utilization even when predictive requests more work because it sometimes forecasts enough connections from pending calls and waits. In the separate load run, four connections created 100 distinct agent–borrower pairs and 100 jobs with zero invariant violations. That result covers the allocation workload at this specific size.
+
+A reserved agent can still disappear after dispatch. The worker requests cancellation and records an answered call without an agent when that evidence arrives. The agent-loss run introduces delayed cancellation to expose this limit. The reservation guarantee covers database ownership and eligibility when checked. It cannot guarantee physical agent presence throughout a call.

@@ -1,4 +1,6 @@
 import argparse
+import json
+from dataclasses import asdict
 from uuid import UUID, uuid4
 
 import psycopg
@@ -11,6 +13,7 @@ from smartdialer.pacing_stats import read_pacing_snapshot
 from smartdialer.providers.mock_fast import FAST_PROVIDER, MockFastProvider
 from smartdialer.providers.mock_unreliable import UNRELIABLE_PROVIDER, MockUnreliableProvider
 from smartdialer.safety import SafetyController
+from smartdialer.simulation import SCENARIOS, describe_result, run_scenario
 from smartdialer.worker import DispatchWorker
 
 
@@ -85,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     approve.add_argument("--request-id", type=_request_id, help="UUID to reuse when retrying a request")
     worker = commands.add_parser("worker", help="process queued jobs, provider events, and recovery")
     worker.add_argument("--once", action="store_true", required=True, help="process bounded work and exit")
+    simulate = commands.add_parser("simulate", help="run seeded pacing scenarios in isolated PostgreSQL schemas")
+    simulate.add_argument("--seed", type=int, default=42)
+    simulate.add_argument("--scenario", choices=("all", *SCENARIOS), default="all")
+    simulate.add_argument("--mode", choices=("both", *DIAL_MODES), default="both")
+    simulate.add_argument("--json", action="store_true", help="include every pacing decision in JSON output")
     args = parser.parse_args(argv)
 
     try:
@@ -107,6 +115,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"Decision {decision.id}: requested {decision.requested_count}, "
                 f"approved {decision.approved_count} ({decision.reason})."
             )
+        elif args.command == "simulate":
+            scenarios = SCENARIOS.values() if args.scenario == "all" else (SCENARIOS[args.scenario],)
+            modes = DIAL_MODES if args.mode == "both" else (args.mode,)
+            results = []
+            for scenario in scenarios:
+                for mode in modes:
+                    result = run_scenario(dsn, scenario, mode, args.seed)
+                    if args.json:
+                        results.append(asdict(result))
+                    else:
+                        print(describe_result(result), flush=True)
+            if args.json:
+                print(json.dumps(results, indent=2))
         else:
             fast, unreliable = MockFastProvider(dsn), MockUnreliableProvider(dsn)
             summary = DispatchWorker(dsn, {fast.name: fast, unreliable.name: unreliable}, sources=(fast, unreliable)).run_once()

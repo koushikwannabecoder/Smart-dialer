@@ -1,8 +1,11 @@
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from smartdialer.allocator import Allocator
@@ -22,11 +25,14 @@ class ApprovalDecision:
 
 
 class SafetyController:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, new_id: Callable[[], UUID] = uuid4) -> None:
         self._dsn = dsn
-        self._allocator = Allocator()
+        self._allocator = Allocator(new_id)
 
-    def approve(self, request: PaceRequest, *, now: datetime | None = None) -> ApprovalDecision:
+    def approve(
+        self, request: PaceRequest, *, now: datetime | None = None,
+        connection: psycopg.Connection | None = None,
+    ) -> ApprovalDecision:
         """Persist one decision and any reservations in a single transaction."""
         if request.mode not in DIAL_MODES:
             raise ValueError(f"Unsupported pacing mode: {request.mode!r}.")
@@ -35,9 +41,17 @@ class SafetyController:
         if now is not None and now.utcoffset() is None:
             raise ValueError("Approval time must include a time zone.")
 
-        with psycopg.connect(self._dsn) as connection:
+        with (psycopg.connect(self._dsn) if connection is None else nullcontext(connection)) as db:
+            if db.info.transaction_status != TransactionStatus.IDLE:
+                raise ValueError("Approval requires a connection without an open transaction.")
             # After a conflicting insert, the replay SELECT needs a fresh snapshot.
-            connection.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
+            db.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
+            return self._approve_in_transaction(db, request, now)
+
+    def _approve_in_transaction(
+        self, connection: psycopg.Connection, request: PaceRequest, now: datetime | None,
+    ) -> ApprovalDecision:
+        with connection.transaction():
             campaign = connection.execute(
                 "SELECT mode, enabled, provider FROM campaigns WHERE id = %s FOR SHARE",
                 (request.campaign_id,),

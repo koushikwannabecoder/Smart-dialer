@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -34,6 +35,9 @@ def count_available_agents(connection: Connection, campaign_id: UUID, now: datet
 
 
 class Allocator:
+    def __init__(self, new_id: Callable[[], UUID] = uuid4) -> None:
+        self._new_id = new_id
+
     def reserve_pairs(
         self,
         connection: Connection,
@@ -77,7 +81,7 @@ class Allocator:
                 "UPDATE borrowers SET status = 'active', updated_at = %s WHERE id = %s",
                 (now, borrower_id),
             )
-            attempt_id = uuid4()
+            attempt_id = self._new_id()
             connection.execute(
                 """
                 INSERT INTO call_attempts (
@@ -92,7 +96,7 @@ class Allocator:
             )
             connection.execute(
                 "INSERT INTO dispatch_jobs (id, attempt_id, state, available_at) VALUES (%s, %s, 'READY', %s)",
-                (uuid4(), attempt_id, now),
+                (self._new_id(), attempt_id, now),
             )
 
         return len(borrowers)

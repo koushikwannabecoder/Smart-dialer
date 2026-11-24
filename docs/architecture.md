@@ -2,7 +2,7 @@
 
 Candidate 1 combines progressive dialing and predictive pacing with an independent hard Safety Controller. The prototype uses one Python package and PostgreSQL.
 
-## Implementation through Phase 4
+## Implementation through Phase 5
 
 The migration CLI applies versioned SQL in order and records each applied version in `schema_migrations`. A database session lock serializes migration runs. Each migration's SQL and ledger entry commit together.
 
@@ -28,6 +28,10 @@ flowchart LR
     Inbox -->|Apply event and ownership changes together| DB
     Provider -->|Result or ambiguity| Worker
     Worker -->|Dispatch intent and fenced result| DB
+    Simulation[Seeded scenario driver] -->|Logical clock and presence updates| DB
+    Simulation -->|Tick| Snapshot
+    Simulation -->|Tick| Worker
+    Load[Concurrent load test] -->|Parallel approval requests| Safety
 ```
 
 | Component | Responsibility |
@@ -38,7 +42,7 @@ flowchart LR
 | Transactional allocator | Reserve one agent and borrower per approved attempt and commit ownership with a dispatch job |
 | Worker and recovery | Lease approved work, persist dispatch intent, check agent and provider status, and recover expired leases |
 | Provider adapters and event handler | Store mock calls and callbacks, persist deliveries before acknowledgement, and apply evidence without regressing state |
-| Simulation and load tests | Planned. Compare the pacing modes using seeded scenarios and measure contention against PostgreSQL |
+| Simulation and load tests | Reuse real pacing, allocation, and dispatch with a logical clock. Exercise allocation contention separately on independent PostgreSQL connections |
 
 ## Safety boundary
 
@@ -51,3 +55,9 @@ After dispatch intent, the provider call runs outside the dialer transaction. A 
 ## Predictive inputs and audit
 
 The PostgreSQL reader counts fresh, non-paused, non-offline agents as staffed. Available capacity is the subset whose state is `AVAILABLE` and who hold no active attempt. Every nonterminal attempt is counted once as connected, unknown, or pending setup. The outcome query selects up to 50 confirmed known terminal outcomes for the campaign and its provider, ordered by terminal time within the past 30 minutes. Measured talk time uses the interval from bridge to termination. The 85% target, five-second forecast, 20% denominator floor, 50-request cap, progressive fallback, and intermediate calculations are persisted in `pacing_decisions.inputs`. The controller uses live database state even if the forecast's provider and capacity snapshots are stale.
+
+## Experiment boundaries
+
+The simulator applies presence changes, processes due provider events and recovery, takes a pacing snapshot, and runs the normal approval and dispatch path at each tick. The clock, staffing schedule, and provider outcomes are synthetic. PostgreSQL runs the real migrations and transactions in a separate schema for each scenario and mode. The provider uses the existing mock ledger and callback delivery path. Trace comparison excludes random IDs and measures utilization over the configured observation window.
+
+The load test uses a different disposable database. Its threads each own one PostgreSQL connection and start together. They run the same Safety Controller transaction and retain reservations through the final audit for unique owners, consistent decision counts, and one ready job per attempt. The timing includes worker connection setup and allocation while excluding schema setup and final auditing.
