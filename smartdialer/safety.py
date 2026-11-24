@@ -6,7 +6,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from smartdialer.allocator import Allocator
-from smartdialer.pacing import PaceRequest
+from smartdialer.pacing import DIAL_MODES, PaceRequest
 
 MAX_APPROVAL_BATCH = 50
 
@@ -28,8 +28,8 @@ class SafetyController:
 
     def approve(self, request: PaceRequest, *, now: datetime | None = None) -> ApprovalDecision:
         """Persist one decision and any reservations in a single transaction."""
-        if request.mode != "progressive":
-            raise ValueError("The dialer currently supports progressive approvals only.")
+        if request.mode not in DIAL_MODES:
+            raise ValueError(f"Unsupported pacing mode: {request.mode!r}.")
         if type(request.requested_count) is not int or not 0 <= request.requested_count < 2**31:
             raise ValueError("Requested count must be a nonnegative PostgreSQL integer.")
         if now is not None and now.utcoffset() is None:

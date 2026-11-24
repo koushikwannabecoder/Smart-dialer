@@ -6,7 +6,7 @@ from uuid import uuid4
 import psycopg
 
 from smartdialer.domain import TERMINAL_CALL_STATES, AgentState, CallState, validate_transition
-from smartdialer.events import apply_evidence, process_one_event, record_event
+from smartdialer.events import apply_evidence, process_one_event, provider_transition, record_event
 from smartdialer.providers.base import EventSource, Provider, ProviderEventType, ProviderOutcome, ProviderResult
 from smartdialer.recovery import (
     Lease, change_agent, claim_job, lock_attempt, record_agent_loss, release_wrap_up, set_job,
@@ -143,14 +143,16 @@ class DispatchWorker:
             else:
                 connection.execute("UPDATE call_attempts SET last_reconciled_at = %s WHERE id = %s", (now, lease.attempt_id))
 
+            terminal_reason = None
             if unknown:
                 target = CallState.UNKNOWN
             elif result.outcome == ProviderOutcome.REJECTED:
                 target = CallState.FAILED
+                terminal_reason = "provider_rejected"
             elif result.outcome == ProviderOutcome.CANCELLED:
                 target = CallState.CANCELLED
             else:
-                target = CallState(result.observed_state or ProviderEventType.INITIATED)
+                target, terminal_reason = provider_transition(result.observed_state or ProviderEventType.INITIATED)
             occurred_at = result.occurred_at or now
             accepted_at = result.accepted_at
             if accepted_at is None and result.outcome == ProviderOutcome.ACCEPTED:
@@ -158,7 +160,7 @@ class DispatchWorker:
             apply_evidence(
                 connection, ctx, target, occurred_at=occurred_at, now=now,
                 accepted_at=accepted_at, provider_call_id=result.provider_call_id,
-                terminal_reason="provider_rejected" if result.outcome == ProviderOutcome.REJECTED else None,
+                terminal_reason=terminal_reason,
             )
             if ctx.state not in TERMINAL_CALL_STATES:
                 set_job(connection, lease.attempt_id, "RECONCILE", now + (lease.backoff if unknown else POLL_INTERVAL),

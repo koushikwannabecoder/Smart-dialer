@@ -21,6 +21,7 @@ class ProviderEventType(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    NO_ANSWER = "NO_ANSWER"
 
 
 @dataclass(frozen=True, slots=True)

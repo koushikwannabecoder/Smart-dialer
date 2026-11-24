@@ -125,6 +125,7 @@ class MockFastProvider:
             result = self._lookup(connection, key, now)
             if result.outcome != ProviderOutcome.ACCEPTED or result.observed_state in {
                 ProviderEventType.COMPLETED, ProviderEventType.FAILED, ProviderEventType.CANCELLED,
+                ProviderEventType.NO_ANSWER,
             }:
                 return result
             connection.execute(

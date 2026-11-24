@@ -19,7 +19,7 @@ def test_progressive_pacer_requests_one_call_per_available_agent():
     assert ProgressivePacer().request(PacingSnapshot(campaign_id, 0)).requested_count == 0
 
 
-@pytest.mark.parametrize("mode, count", [("predictive", 1), ("progressive", -1)])
+@pytest.mark.parametrize("mode, count", [("unsupported", 1), ("progressive", -1)])
 def test_unsupported_requests_are_rejected_before_accessing_postgresql(mode, count):
     with pytest.raises(ValueError):
         SafetyController("unused").approve(PaceRequest(uuid4(), uuid4(), mode, count))

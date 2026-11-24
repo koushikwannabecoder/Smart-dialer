@@ -6,7 +6,8 @@ import psycopg
 from smartdialer.allocator import count_available_agents
 from smartdialer.config import database_url
 from smartdialer.db import migrate
-from smartdialer.pacing import PacingSnapshot, ProgressivePacer
+from smartdialer.pacing import DIAL_MODES, PacingSnapshot, PredictivePacer, ProgressivePacer
+from smartdialer.pacing_stats import read_pacing_snapshot
 from smartdialer.providers.mock_fast import FAST_PROVIDER, MockFastProvider
 from smartdialer.providers.mock_unreliable import UNRELIABLE_PROVIDER, MockUnreliableProvider
 from smartdialer.safety import SafetyController
@@ -27,7 +28,7 @@ def _request_id(value: str) -> UUID:
         raise argparse.ArgumentTypeError("request ID must be a UUID") from error
 
 
-def _seed_demo(dsn: str, name: str, agents: int, borrowers: int, provider: str) -> UUID:
+def _seed_demo(dsn: str, name: str, agents: int, borrowers: int, provider: str, mode: str) -> UUID:
     if not name.strip():
         raise ValueError("Campaign name must not be empty.")
     campaign_id = uuid4()
@@ -35,8 +36,8 @@ def _seed_demo(dsn: str, name: str, agents: int, borrowers: int, provider: str) 
         if cursor.execute("SELECT 1 FROM campaigns WHERE name = %s LIMIT 1", (name,)).fetchone():
             raise ValueError(f"Campaign {name!r} already exists. Use a fresh demo name.")
         cursor.execute(
-            "INSERT INTO campaigns (id, name, mode, provider) VALUES (%s, %s, 'progressive', %s)",
-            (campaign_id, name, provider),
+            "INSERT INTO campaigns (id, name, mode, provider) VALUES (%s, %s, %s, %s)",
+            (campaign_id, name, mode, provider),
         )
         cursor.executemany(
             "INSERT INTO borrowers (id, campaign_id, destination, status) VALUES (%s, %s, %s, 'eligible')",
@@ -49,32 +50,38 @@ def _seed_demo(dsn: str, name: str, agents: int, borrowers: int, provider: str) 
     return campaign_id
 
 
-def _read_snapshot(dsn: str, name: str) -> PacingSnapshot:
+def _read_snapshot(dsn: str, name: str, mode: str | None) -> tuple[str, PacingSnapshot]:
     with psycopg.connect(dsn) as connection:
+        connection.read_only = True
+        connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         campaigns = connection.execute(
-            "SELECT id FROM campaigns WHERE name = %s LIMIT 2", (name,)
+            "SELECT id, mode FROM campaigns WHERE name = %s LIMIT 2", (name,)
         ).fetchall()
         if not campaigns:
             raise ValueError(f"Unknown campaign {name!r}.")
         if len(campaigns) > 1:
             raise ValueError(f"Campaign name {name!r} is ambiguous.")
-        (campaign_id,), = campaigns
+        (campaign_id, campaign_mode), = campaigns
+        selected_mode = mode if mode is not None else campaign_mode
         now = connection.execute("SELECT clock_timestamp()").fetchone()[0]
-        return PacingSnapshot(campaign_id, count_available_agents(connection, campaign_id, now))
+        if selected_mode == "predictive":
+            return selected_mode, read_pacing_snapshot(connection, campaign_id, now=now)
+        return selected_mode, PacingSnapshot(campaign_id, count_available_agents(connection, campaign_id, now))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="smartdialer", description="SmartDialer prototype")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("migrate", help="apply pending PostgreSQL migrations")
-    seed = commands.add_parser("seed-demo", help="create a progressive campaign with synthetic data")
+    seed = commands.add_parser("seed-demo", help="create a campaign with synthetic data")
     seed.add_argument("--campaign", required=True)
     seed.add_argument("--agents", required=True, type=_nonnegative_count)
     seed.add_argument("--borrowers", required=True, type=_nonnegative_count)
     seed.add_argument("--provider", choices=[FAST_PROVIDER, UNRELIABLE_PROVIDER], default=FAST_PROVIDER)
-    approve = commands.add_parser("approve", help="request progressive approvals")
+    seed.add_argument("--mode", choices=DIAL_MODES, default="progressive")
+    approve = commands.add_parser("approve", help="request approvals through the Safety Controller")
     approve.add_argument("--campaign", required=True)
-    approve.add_argument("--mode", choices=["progressive"], default="progressive")
+    approve.add_argument("--mode", choices=DIAL_MODES, help="defaults to the campaign's configured mode")
     approve.add_argument("--request-id", type=_request_id, help="UUID to reuse when retrying a request")
     worker = commands.add_parser("worker", help="process queued jobs, provider events, and recovery")
     worker.add_argument("--once", action="store_true", required=True, help="process bounded work and exit")
@@ -89,11 +96,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("No pending migrations.")
         elif args.command == "seed-demo":
-            campaign_id = _seed_demo(dsn, args.campaign, args.agents, args.borrowers, args.provider)
+            campaign_id = _seed_demo(dsn, args.campaign, args.agents, args.borrowers, args.provider, args.mode)
             print(f"Created campaign {args.campaign!r} ({campaign_id}).")
         elif args.command == "approve":
-            snapshot = _read_snapshot(dsn, args.campaign)
-            request = ProgressivePacer().request(snapshot, request_id=args.request_id)
+            mode, snapshot = _read_snapshot(dsn, args.campaign, args.mode)
+            pacer = PredictivePacer() if mode == "predictive" else ProgressivePacer()
+            request = pacer.request(snapshot, request_id=args.request_id)
             decision = SafetyController(dsn).approve(request)
             print(
                 f"Decision {decision.id}: requested {decision.requested_count}, "

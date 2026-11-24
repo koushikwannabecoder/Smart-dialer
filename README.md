@@ -2,7 +2,7 @@
 
 SmartDialer is a Python and PostgreSQL prototype for progressive outbound dialing with predictive pacing. The chosen architecture puts an independent Safety Controller between both pacing modes and provider dispatch.
 
-**Phase 3 runs progressive calls end to end.** SmartDialer reserves agents and borrowers, dispatches approved jobs to two mock providers, applies their events, and recovers ambiguous outcomes. Predictive pacing, simulation, and load testing come later.
+**Phase 4 adds predictive pacing.** Both modes reserve agents and borrowers through the same Safety Controller. The worker dispatches approved jobs to two mock providers, applies their events, and recovers ambiguous outcomes. Seeded simulation and load testing come later.
 
 ## Prerequisites and installation
 
@@ -36,7 +36,7 @@ python -m smartdialer.cli migrate
 python -m smartdialer.cli migrate
 ```
 
-On an empty database the first run prints `Applied migrations: 001, 002, 003`. The second run prints `No pending migrations.` A Phase 2 database applies only `003`. Migration preserves existing approvals and queued jobs. Phase 1 attempts without an approval remain ineligible for dispatch.
+On an empty database the first run prints `Applied migrations: 001, 002, 003, 004`. The second run prints `No pending migrations.` A Phase 3 database applies only `004`, which adds an index for recent outcomes and lets the provider inbox record `NO_ANSWER` explicitly.
 
 ## Run a progressive call demo
 
@@ -54,6 +54,27 @@ done
 ```
 
 The approval command prints a decision UUID and `requested 5, approved 5 (approved)`. Each approval creates one `RESERVED` attempt and one `READY` job. Worker output reports processed jobs, applied events, and released agent wrap-ups. The mock fast run ends with five `COMPLETED` attempts and five `DONE` jobs. Pass the printed decision UUID as `--request-id` to replay the approval without creating more jobs.
+
+## Run predictive pacing
+
+```bash
+python -m smartdialer.cli seed-demo --campaign forecast --agents 5 --borrowers 20 --mode predictive && \
+python -m smartdialer.cli approve --campaign forecast --mode predictive
+```
+
+With no call history, this demo uses progressive demand and reports five requested and five approved. The campaign's configured mode is the default for `approve`. To run dispatch, invoke `worker --once` immediately and continue running it as in the progressive demo.
+
+Predictive mode uses up to 50 known outcomes from the selected campaign and provider over the past 30 minutes. It needs at least 10 samples. Answer or bridge evidence counts as an answer. An explicit `NO_ANSWER` counts as a miss. Provider failures, implicit cancellations without answer evidence, and unknown attempts stay out of that rate.
+
+The forecast targets 85% of freshly staffed agents, rounded up, five seconds ahead. It subtracts current connections expected to remain, expected answers from pending setups, and one potential answer per unknown attempt. It divides any remaining demand by the observed answer rate with a 20% floor, rounds up, and caps the request at 50. With 20 staffed agents, eight connected, a mean talk time of 40 seconds, four pending setups, a 50% answer rate, and no unknowns, the target is 17. One connection is forecast to finish and two pending setups are expected to answer, so the estimate is `8 - 1 + 2 = 9`. The predictor requests `ceil((17 - 9) / 0.5) = 16`. With only eight free agents, the controller approves eight.
+
+The controller rechecks current capacity and provider health in PostgreSQL. Predictive demand can change batch sizes within that limit. It can match progressive utilization when progressive dialing already fills every safe slot. Inspect the stored calculation and dispatch progress with `psql`:
+
+```bash
+psql "$DATABASE_URL" -c "SELECT d.mode, d.requested_count, d.approved_count, d.reason, d.inputs,
+    (SELECT count(*) FROM call_attempts c WHERE c.decision_id = d.id AND c.dispatch_started_at IS NOT NULL)
+    AS dispatch_started_count FROM pacing_decisions d ORDER BY d.created_at DESC LIMIT 5;"
+```
 
 ## Inspect and recover work
 

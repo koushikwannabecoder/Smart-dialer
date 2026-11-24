@@ -3,8 +3,14 @@ from datetime import datetime
 import psycopg
 
 from smartdialer.domain import TERMINAL_CALL_STATES, AgentState, CallState, InvalidTransition, validate_transition
-from smartdialer.providers.base import ProviderEvent
+from smartdialer.providers.base import ProviderEvent, ProviderEventType
 from smartdialer.recovery import AttemptContext, change_agent, lock_attempt, record_agent_loss, set_job
+
+
+def provider_transition(kind: ProviderEventType | str) -> tuple[CallState, str | None]:
+    if kind == ProviderEventType.NO_ANSWER:
+        return CallState.FAILED, "no_answer"
+    return CallState(kind), None
 
 
 def apply_evidence(
@@ -126,8 +132,9 @@ def process_one_event(dsn: str, now: datetime) -> bool:
         if ctx.attempt["provider"] != provider or ctx.attempt["dispatch_started_at"] is None or ctx.job is None:
             error = "event has no matching dispatched attempt"
         else:
-            target = CallState(kind)
-            apply_evidence(connection, ctx, target, occurred_at=occurred_at, now=now, accepted_at=occurred_at)
+            target, reason = provider_transition(kind)
+            apply_evidence(connection, ctx, target, occurred_at=occurred_at, now=now,
+                           accepted_at=occurred_at, terminal_reason=reason)
         connection.execute(
             "UPDATE provider_events SET processed_at = %s, processing_error = %s WHERE id = %s",
             (now, error, event_id),
