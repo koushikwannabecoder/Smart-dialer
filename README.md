@@ -1,14 +1,12 @@
 # SmartDialer
 
-SmartDialer is a Python and PostgreSQL prototype for progressive outbound dialing with predictive pacing. The chosen architecture puts an independent Safety Controller between both pacing modes and provider dispatch.
-
-**Phase 5 adds seeded simulations and a PostgreSQL load test.** Both dialing modes use the same Safety Controller, durable worker, and recovery path. The simulations compare their behavior with the same workload and provider conditions.
+SmartDialer is a Python and PostgreSQL outbound dialing prototype. Progressive pacing requests one call per available agent. Predictive pacing forecasts demand from current activity and recent outcomes. Both submit requests to an independent Safety Controller, which approves only calls with a currently eligible agent and borrower. A durable worker dispatches approved jobs to two mock providers and recovers interrupted work. Seeded simulations compare the two policies, and a separate PostgreSQL load test verifies allocation under contention.
 
 ## Prerequisites and installation
 
 - Python 3.11 or later.
-- A running PostgreSQL server. The migrations are tested on PostgreSQL 16.
-- A PostgreSQL role that can create tables in the development database and schemas in a separate disposable test database.
+- A running PostgreSQL server and the `createdb` and `psql` client tools. Clean-run verification used Python 3.12 and PostgreSQL 16.
+- A PostgreSQL role that can create tables and schemas in the development database and schemas in the disposable test and load databases. The `createdb` examples also require permission to create databases.
 
 From the repository root:
 
@@ -20,23 +18,25 @@ python -m pip install -e '.[dev]'
 
 ## Database setup and configuration
 
-Create two databases with your PostgreSQL tools. The following example uses the `createdb` client and a role with database creation rights. Replace `YOUR_POSTGRES_USER` with your local role.
+Create three local databases. Replace `YOUR_POSTGRES_USER` with your PostgreSQL role.
 
 ```bash
 createdb -h localhost -U YOUR_POSTGRES_USER smartdialer
 createdb -h localhost -U YOUR_POSTGRES_USER smartdialer_test
+createdb -h localhost -U YOUR_POSTGRES_USER smartdialer_load
 ```
 
-Export connection URLs for the two databases. Replace `USER` and `PASSWORD` with your PostgreSQL credentials and adjust the host and port if needed. `.env.example` lists the settings. The CLI reads the shell environment directly.
+Export their connection URLs. Replace `USER` and `PASSWORD` with your PostgreSQL credentials and adjust the host and port as needed. `.env.example` lists the settings. Commands read the shell environment directly.
 
 ```bash
 export DATABASE_URL='postgresql://USER:PASSWORD@localhost:5432/smartdialer'
 export TEST_DATABASE_URL='postgresql://USER:PASSWORD@localhost:5432/smartdialer_test'
+export LOAD_TEST_DATABASE_URL='postgresql://USER:PASSWORD@localhost:5432/smartdialer_load'
 python -m smartdialer.cli migrate
 python -m smartdialer.cli migrate
 ```
 
-On an empty database the first run prints `Applied migrations: 001, 002, 003, 004`. The second run prints `No pending migrations.` A Phase 3 database applies only `004`, which adds an index for recent outcomes and lets the provider inbox record `NO_ANSWER` explicitly.
+On an empty development database the first run prints `Applied migrations: 001, 002, 003, 004`. The second run prints `No pending migrations.` The simulation, tests, and load runner migrate their own temporary schemas.
 
 ## Run a progressive call demo
 
@@ -59,16 +59,17 @@ The approval command prints a decision UUID and `requested 5, approved 5 (approv
 
 ```bash
 python -m smartdialer.cli seed-demo --campaign forecast --agents 5 --borrowers 20 --mode predictive && \
-python -m smartdialer.cli approve --campaign forecast --mode predictive
+python -m smartdialer.cli approve --campaign forecast --mode predictive && \
+python -m smartdialer.cli worker --once
 ```
 
-With no call history, this demo uses progressive demand and reports five requested and five approved. The campaign's configured mode is the default for `approve`. To run dispatch, invoke `worker --once` immediately and continue running it as in the progressive demo.
+With no call history, this demo uses progressive demand and reports five requested and five approved. The campaign's configured mode is the default for `approve`. Use the worker loop from the progressive demo to collect callbacks and finish both the calls and agent wrap-ups.
 
-Predictive mode uses up to 50 known outcomes from the selected campaign and provider over the past 30 minutes. It needs at least 10 samples. Answer or bridge evidence counts as an answer. An explicit `NO_ANSWER` counts as a miss. Provider failures, implicit cancellations without answer evidence, and unknown attempts stay out of that rate.
+Predictive mode uses up to 50 known outcomes from the selected campaign and provider over the past 30 minutes. It needs at least 10 samples. Answer or bridge evidence counts as an answer. An explicit `NO_ANSWER` counts as a miss. Provider failures, cancellations without answer evidence, and unknown attempts stay out of that rate.
 
 The forecast targets 85% of freshly staffed agents, rounded up, five seconds ahead. It subtracts current connections expected to remain, expected answers from pending setups, and one potential answer per unknown attempt. It divides any remaining demand by the observed answer rate with a 20% floor, rounds up, and caps the request at 50. With 20 staffed agents, eight connected, a mean talk time of 40 seconds, four pending setups, a 50% answer rate, and no unknowns, the target is 17. One connection is forecast to finish and two pending setups are expected to answer, so the estimate is `8 - 1 + 2 = 9`. The predictor requests `ceil((17 - 9) / 0.5) = 16`. With only eight free agents, the controller approves eight.
 
-The controller rechecks current capacity and provider health in PostgreSQL. Predictive demand can change batch sizes within that limit. It can match progressive utilization when progressive dialing already fills every safe slot. Inspect the stored calculation and dispatch progress with `psql`:
+The controller rechecks current capacity and provider health in PostgreSQL. The integration test `test_forecast_and_database_explain_sixteen_requested_but_eight_approved` reproduces the worked example. Inspect the stored calculation and dispatch intent with `psql`:
 
 ```bash
 psql "$DATABASE_URL" -c "SELECT d.mode, d.requested_count, d.approved_count, d.reason, d.inputs,
@@ -78,7 +79,7 @@ psql "$DATABASE_URL" -c "SELECT d.mode, d.requested_count, d.approved_count, d.r
 
 ## Inspect and recover work
 
-The worker processes bounded work and exits. Run `worker --once` again to process due events, retry reconciliation, or reclaim a lease after a worker stops. Leases expire after five seconds. A timeout preserves ownership and causes a same-key lookup before any possible retry. Three consecutive start timeouts pause that provider's new approvals and starts for 30 seconds. Existing events and reconciliation continue during cooldown.
+The worker processes bounded work and exits. Run `worker --once` again to process due events, retry reconciliation, or reclaim a lease after a worker stops. Leases expire after five seconds. A timeout preserves ownership. The worker looks up the original provider key before retrying a start and requests cancellation if the agent was lost. Three consecutive start timeouts pause that provider's new approvals and starts for 30 seconds. Existing events and reconciliation continue during cooldown.
 
 Use `psql` to inspect an attempt alongside its worker job:
 
@@ -89,7 +90,27 @@ psql "$DATABASE_URL" -c 'SELECT c.id, c.provider, c.state, c.dispatch_status,
     ORDER BY c.created_at DESC LIMIT 20;'
 ```
 
-An unresolved attempt can continue to hold an agent and borrower if the provider cannot confirm an outcome. The mocks use PostgreSQL as a separate provider ledger and place no real calls. Demo agents have an initial heartbeat only. Long manual pauses can cause them to go offline.
+After either demo completes, trace one call from the approval decision through the provider's callbacks:
+
+```bash
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" <<'SQL'
+WITH example AS (
+  SELECT * FROM call_attempts WHERE state = 'COMPLETED'
+  ORDER BY terminated_at DESC, id LIMIT 1
+)
+SELECT d.id AS decision_id, d.mode, d.requested_count, d.approved_count,
+       c.id AS attempt_id, c.idempotency_key AS provider_key, c.provider_call_id,
+       c.dispatch_started_at, c.provider_accepted_at, c.terminal_reason, j.state AS job_state,
+       e.provider_event_id, e.event_type, e.processed_at
+FROM example c
+JOIN pacing_decisions d ON d.id = c.decision_id
+JOIN dispatch_jobs j ON j.attempt_id = c.id
+LEFT JOIN provider_events e ON e.attempt_id = c.id
+ORDER BY e.occurred_at, e.id;
+SQL
+```
+
+The decision row explains demand and approval. `dispatch_started_at` is durable intent, while `provider_accepted_at` records provider evidence. In the normal `mock_fast` demo, the event rows show ringing, answer, bridge, and completion. Completion supplies the terminal evidence that closes the job and releases call ownership.
 
 ## Run the simulation
 
@@ -132,17 +153,15 @@ In scenario A, the first predictive reduction came at t=15 s. The controller app
 
 ## Run the PostgreSQL load test
 
-Create a separate disposable PostgreSQL database and set `LOAD_TEST_DATABASE_URL` to its connection URL. The script starts one PostgreSQL connection per worker, waits for them at a barrier, and issues overlapping approvals against one campaign. It retains the reservations for a final audit, then drops its temporary schema. A failed invariant or database error produces a nonzero exit status.
+Use the separate disposable database in `LOAD_TEST_DATABASE_URL`. The script starts one PostgreSQL connection per worker, waits for them at a barrier, and issues overlapping approvals against one campaign. It retains the reservations for a final audit, then drops its temporary schema. A failed invariant or database error produces a nonzero exit status.
 
 ```bash
-createdb -h localhost -U YOUR_POSTGRES_USER smartdialer_load
-export LOAD_TEST_DATABASE_URL='postgresql://USER:PASSWORD@localhost:5432/smartdialer_load'
 python scripts/load_test.py --agents 100 --borrowers 200 --workers 4
 ```
 
 The result reports elapsed allocation time, approvals per second, worker connections, decisions with zero approvals, and failed invariants. It measures local allocation against PostgreSQL at the specified size. Provider capacity and production throughput are outside that measurement.
 
-One local run on PostgreSQL 16 produced 100 unique active pairs and 100 ready jobs from four connections with 200 borrowers. It recorded three zero-approval decisions, zero database errors, and zero invariant violations. Allocation took 0.140 seconds, approximately 716 approvals per second in that run.
+The clean verification run on PostgreSQL 16 produced 100 unique active pairs and 100 ready jobs from four connections with 200 borrowers. It recorded ten zero-approval decisions, zero database errors, and zero invariant violations. Allocation took 0.239 seconds, approximately 418 approvals per second in that run. Timing and zero-approval counts vary with contention and host load.
 
 ## Testing
 
@@ -151,6 +170,15 @@ pytest -q
 ```
 
 The PostgreSQL tests create and drop their own schemas inside `TEST_DATABASE_URL`. Set it to a disposable database to run the full suite. `tests/test_simulation.py` covers reproducibility and real PostgreSQL contention. `tests/test_failure_scenarios.py` covers cooldown and availability loss. `tests/test_recovery.py` includes an actual subprocess exit after provider acceptance. `tests/test_events.py` covers duplicates, reordered events, and replay around `ANSWERED`. If the URL is unset, pytest skips the database tests.
+
+## Limitations and cleanup
+
+- The providers are mocks with a separately committed ledger on the same PostgreSQL instance. The prototype places no real calls and does not model an independent provider losing its data.
+- The CLI needs repeated worker invocations. Demo agents get a single initial heartbeat. A pause longer than five seconds can make them ineligible.
+- An unresolved provider outcome can hold an agent and borrower indefinitely. An agent can also leave after dispatch while cancellation is unavailable. A borrower who answers in that interval may have no agent to speak to.
+- The seed-42 baseline showed lower utilization for predictive in A–D. Its terminal-only history sees short unsuccessful attempts sooner than long conversations, which can skew the observed answer rate during a change. The load run validates local allocation at one size. Larger deployment limits and real provider throughput remain unmeasured.
+
+On normal exit, simulations, tests, and the load runner remove the temporary schemas they create. Demo campaigns remain in the development database. Use a fresh campaign name to repeat a demo, or discard the disposable database when you finish.
 
 ## Design documentation
 
