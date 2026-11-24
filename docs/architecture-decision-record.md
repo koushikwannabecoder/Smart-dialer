@@ -1,6 +1,6 @@
 # Architecture decision record
 
-**Accepted design:** Candidate 1 combines Progressive Dialing, a Predictive Pacing Engine, and an Independent Hard Safety Controller. Phase 1 establishes the database and domain contracts.
+**Accepted design:** Candidate 1 combines Progressive Dialing, a Predictive Pacing Engine, and an Independent Hard Safety Controller. Phase 2 adds progressive approval and durable reservations to the database and domain foundation.
 
 ## Context and alternatives
 
@@ -8,11 +8,11 @@ The prototype should improve agent utilization while keeping each outbound call 
 
 ## Decision
 
-Use Python and a CLI in one codebase. Use PostgreSQL as the source of truth for attempts and ownership. Row locks, uniqueness constraints, and transactions will let multiple workers reserve agents and borrowers and enqueue approved work together. A PostgreSQL-backed worker can recover durable jobs without introducing a separate queue service. Pacing logic has read-only inputs and submits a request to the separate controller.
+Use Python and a CLI in one codebase. Use PostgreSQL as the source of truth for attempts and ownership. The controller holds a shared campaign lock during approval. Inside that transaction, the allocator locks agents before borrowers in ID order and uses `SKIP LOCKED` to allow concurrent approvals. Partial unique indexes on both owners protect every nonterminal attempt. The caller's request UUID is the decision's primary key so replays return the original approval. A PostgreSQL-backed worker can later recover the jobs without a separate queue service.
 
 ## Guarantees and trade-offs
 
-Phase 1 enforces campaign membership and allowed stored state values. The lifecycle validators reject invalid state changes. The next phase adds exclusive active ownership and the atomic approval transaction. The provider and recovery phase adds stable-key reconciliation and durable event handling for `UNKNOWN` outcomes.
+Phase 2 adds exclusive active ownership and commits each approval, its reservations, and its dispatch jobs together. Skipping locked rows can reduce approvals for a tick during contention. The 50-pair batch limit caps transaction size. A stored `READY` job represents an approved reservation awaiting dispatch. The provider and recovery phase will use the attempt UUID as the provider idempotency key and reconcile ambiguous outcomes.
 
 At approval time each active attempt needs its own eligible agent and borrower. Unknown outcomes will retain that ownership at the cost of temporary capacity. The mock provider contract must support idempotent starts and lookup by stable key for recovery after ambiguous dispatch.
 

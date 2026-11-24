@@ -1,6 +1,6 @@
 # Call state machine
 
-An eligible borrower represents queued work. The attempt begins in `RESERVED` when an approval is committed. Phase 1 defines the states and validates their edges. The later worker and event handler will enforce the evidence required for each edge.
+An eligible borrower represents queued work. Phase 2 creates a `RESERVED` attempt when approval commits. The same transaction writes the decision, the agent and borrower reservation, and one `READY` job. If it rolls back, no attempt or job is visible. The attempt's dispatch status starts at `PENDING`. The worker and event handler will drive the dispatch and recovery edges in later phases.
 
 ```mermaid
 stateDiagram-v2

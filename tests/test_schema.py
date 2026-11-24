@@ -51,16 +51,37 @@ def insert_attempt(connection, campaign_id, agent_id, borrower_id, state="RESERV
 
 
 def test_clean_migration_and_repeat(test_dsn):
-    assert db.migrate(test_dsn) == [1]
+    assert db.migrate(test_dsn) == [1, 2]
     assert db.migrate(test_dsn) == []
     with psycopg.connect(test_dsn) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        assert connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,)]
         campaign_id = insert_campaign(connection)
         agent_id = insert_agent(connection, campaign_id)
         borrower_id = insert_borrower(connection, campaign_id)
         state, created_at = insert_attempt(connection, campaign_id, agent_id, borrower_id, "UNKNOWN")
         assert state == "UNKNOWN"
         assert created_at.utcoffset() is not None
+
+
+def test_upgrade_preserves_phase_one_attempt_without_queuing_it(test_dsn, tmp_path, monkeypatch):
+    initial = db.files("smartdialer.migrations").joinpath("001_initial.sql").read_text(encoding="utf-8")
+    (tmp_path / "001_initial.sql").write_text(initial, encoding="utf-8")
+    with monkeypatch.context() as migration_resources:
+        migration_resources.setattr(db, "files", lambda _: tmp_path)
+        assert db.migrate(test_dsn) == [1]
+
+    with psycopg.connect(test_dsn) as connection:
+        campaign_id = insert_campaign(connection)
+        agent_id = insert_agent(connection, campaign_id)
+        borrower_id = insert_borrower(connection, campaign_id)
+        insert_attempt(connection, campaign_id, agent_id, borrower_id, "UNKNOWN")
+
+    assert db.migrate(test_dsn) == [2]
+    with psycopg.connect(test_dsn) as connection:
+        assert connection.execute(
+            "SELECT agent_id, borrower_id, state, decision_id, dispatch_status FROM call_attempts"
+        ).fetchall() == [(agent_id, borrower_id, "UNKNOWN", None, None)]
+        assert connection.execute("SELECT count(*) FROM dispatch_jobs").fetchone() == (0,)
 
 
 def test_failed_migration_rolls_back_without_undoing_previous_version(test_dsn, tmp_path, monkeypatch):
