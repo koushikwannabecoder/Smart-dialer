@@ -1,6 +1,6 @@
 # Agent state machine
 
-Phase 2 executes the `AVAILABLE → RESERVED` transition during approval. The other lifecycle edges are defined by the validator for later operational flows.
+Phase 3 executes reservation, dialing, bridge, and release transitions. Presence inputs come from the stored agent state and heartbeat. The demo seeds an initial heartbeat.
 
 ```mermaid
 stateDiagram-v2
@@ -17,10 +17,10 @@ stateDiagram-v2
     DIALING --> WRAP_UP: terminal evidence also confirms bridge
     DIALING --> AVAILABLE: definitive end without bridge
     DIALING --> PAUSED: pause during setup
-    DIALING --> OFFLINE: departure
+    DIALING --> OFFLINE: departure or expired heartbeat
     CONNECTED --> WRAP_UP: call ends
     CONNECTED --> OFFLINE: departure
-    WRAP_UP --> AVAILABLE: wrap-up ends
+    WRAP_UP --> AVAILABLE: one-second wrap-up ends with fresh heartbeat
     WRAP_UP --> PAUSED: pause
     WRAP_UP --> OFFLINE: departure
     PAUSED --> AVAILABLE: resume while present and eligible
@@ -31,4 +31,4 @@ stateDiagram-v2
 
 The allocator requires an `AVAILABLE` agent with a heartbeat no older than five seconds and no nonterminal attempt. It locks candidate rows and skips any held by another transaction. PostgreSQL also prevents two nonterminal attempts from owning the same agent. Only paired agents are updated. If a later write fails, the reservation is rolled back and the previous state remains visible.
 
-Presence and ownership are separate. An agent may become `OFFLINE` before the provider confirms a call has ended. That attempt still owns the agent and borrower. A returning agent becomes `AVAILABLE` only after the unresolved attempt is cleared and the agent is otherwise eligible. If a pause or departure happens during setup, the planned worker will cancel or reconcile the attempt before releasing ownership.
+Presence and ownership are separate. Before dispatch, the worker cancels locally if the agent is unavailable. After dispatch intent, loss of the agent triggers provider cancellation. An ambiguous cancel keeps both reservations and schedules reconciliation. Completions preserve `OFFLINE` and `PAUSED`. A connected agent enters `WRAP_UP` on definitive termination and is released as `AVAILABLE` only while fresh. An answered call after agent loss is recorded as an incident.

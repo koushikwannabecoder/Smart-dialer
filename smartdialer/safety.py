@@ -29,7 +29,7 @@ class SafetyController:
     def approve(self, request: PaceRequest, *, now: datetime | None = None) -> ApprovalDecision:
         """Persist one decision and any reservations in a single transaction."""
         if request.mode != "progressive":
-            raise ValueError("Phase 2 supports progressive approvals only.")
+            raise ValueError("The dialer currently supports progressive approvals only.")
         if type(request.requested_count) is not int or not 0 <= request.requested_count < 2**31:
             raise ValueError("Requested count must be a nonnegative PostgreSQL integer.")
         if now is not None and now.utcoffset() is None:
@@ -39,12 +39,12 @@ class SafetyController:
             # After a conflicting insert, the replay SELECT needs a fresh snapshot.
             connection.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
             campaign = connection.execute(
-                "SELECT mode, enabled FROM campaigns WHERE id = %s FOR SHARE",
+                "SELECT mode, enabled, provider FROM campaigns WHERE id = %s FOR SHARE",
                 (request.campaign_id,),
             ).fetchone()
             if campaign is None:
                 raise ValueError(f"Unknown campaign {request.campaign_id}.")
-            mode, enabled = campaign
+            mode, enabled, provider = campaign
 
             # A replay can conflict with either the primary key or the composite foreign-key target.
             claimed = connection.execute(
@@ -80,16 +80,22 @@ class SafetyController:
                 checked_at = now
                 if checked_at is None:
                     checked_at = connection.execute("SELECT clock_timestamp()").fetchone()[0]
-                approved = self._allocator.reserve_pairs(
-                    connection, decision_id=request.id, campaign_id=request.campaign_id,
-                    limit=limit, now=checked_at,
-                )
-                if approved < limit:
-                    reason = "insufficient_capacity"
-                elif approved < request.requested_count:
-                    reason = "batch_limit"
+                blocked_until = connection.execute(
+                    "SELECT blocked_until FROM provider_health WHERE provider = %s", (provider,)
+                ).fetchone()[0]
+                if blocked_until is not None and blocked_until > checked_at:
+                    reason = "provider_unavailable"
                 else:
-                    reason = "approved"
+                    approved = self._allocator.reserve_pairs(
+                        connection, decision_id=request.id, campaign_id=request.campaign_id,
+                        limit=limit, now=checked_at, provider=provider,
+                    )
+                    if approved < limit:
+                        reason = "insufficient_capacity"
+                    elif approved < request.requested_count:
+                        reason = "batch_limit"
+                    else:
+                        reason = "approved"
 
             connection.execute(
                 "UPDATE pacing_decisions SET approved_count = %s, reason = %s WHERE id = %s",

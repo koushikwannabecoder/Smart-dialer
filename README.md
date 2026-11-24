@@ -2,7 +2,7 @@
 
 SmartDialer is a Python and PostgreSQL prototype for progressive outbound dialing with predictive pacing. The chosen architecture puts an independent Safety Controller between both pacing modes and provider dispatch.
 
-**Phase 2 supports progressive approvals.** SmartDialer can request calls, reserve eligible agents and borrowers in PostgreSQL, and queue approved attempts. Jobs remain queued at this phase. Provider dispatch, recovery, predictive pacing, simulation, and load testing come later.
+**Phase 3 runs progressive calls end to end.** SmartDialer reserves agents and borrowers, dispatches approved jobs to two mock providers, applies their events, and recovers ambiguous outcomes. Predictive pacing, simulation, and load testing come later.
 
 ## Prerequisites and installation
 
@@ -36,18 +36,39 @@ python -m smartdialer.cli migrate
 python -m smartdialer.cli migrate
 ```
 
-On an empty database the first run prints `Applied migrations: 001, 002`. The second run prints `No pending migrations.` An existing Phase 1 database only applies `002`. Existing attempts are preserved without new approvals or jobs. If old data contains duplicate active owners, PostgreSQL rejects the migration until those records are reconciled.
+On an empty database the first run prints `Applied migrations: 001, 002, 003`. The second run prints `No pending migrations.` A Phase 2 database applies only `003`. Migration preserves existing approvals and queued jobs. Phase 1 attempts without an approval remain ineligible for dispatch.
 
-## Run the progressive approval demo
+## Run a progressive call demo
 
-Seed synthetic data and request approvals immediately. Agents are eligible for five seconds after the heartbeat recorded by the seed command. Use a fresh campaign name for each new demo.
+Use a fresh campaign name for each demo. Seed, approve, and start the worker together because a demo agent's initial heartbeat is fresh for five seconds. The CLI supports `mock_fast` for quick, ordered callbacks and `mock_unreliable` for slower events, duplicate answers, late ringing, and occasional start timeouts.
 
 ```bash
-python -m smartdialer.cli seed-demo --campaign demo --agents 5 --borrowers 20 && \
-python -m smartdialer.cli approve --campaign demo --mode progressive
+python -m smartdialer.cli seed-demo --campaign demo --agents 5 --borrowers 20 --provider mock_fast && \
+python -m smartdialer.cli approve --campaign demo --mode progressive && \
+python -m smartdialer.cli worker --once
+
+for tick in 1 2 3 4; do
+    sleep 1
+    python -m smartdialer.cli worker --once
+done
 ```
 
-The approval command prints a decision UUID and `requested 5, approved 5 (approved)`. Each approval reserves one agent and borrower, writes a `RESERVED` attempt with `PENDING` dispatch status, and creates one `READY` job. A job in this state is ready for a future worker. To retry an approval, pass the printed UUID as `--request-id`. The command returns the original counts without creating more jobs.
+The approval command prints a decision UUID and `requested 5, approved 5 (approved)`. Each approval creates one `RESERVED` attempt and one `READY` job. Worker output reports processed jobs, applied events, and released agent wrap-ups. The mock fast run ends with five `COMPLETED` attempts and five `DONE` jobs. Pass the printed decision UUID as `--request-id` to replay the approval without creating more jobs.
+
+## Inspect and recover work
+
+The worker processes bounded work and exits. Run `worker --once` again to process due events, retry reconciliation, or reclaim a lease after a worker stops. Leases expire after five seconds. A timeout preserves ownership and causes a same-key lookup before any possible retry. Three consecutive start timeouts pause that provider's new approvals and starts for 30 seconds. Existing events and reconciliation continue during cooldown.
+
+Use `psql` to inspect an attempt alongside its worker job:
+
+```bash
+psql "$DATABASE_URL" -c 'SELECT c.id, c.provider, c.state, c.dispatch_status,
+    c.provider_call_id, c.answered_without_agent_at, j.state AS job_state, j.last_error
+    FROM call_attempts c JOIN dispatch_jobs j ON j.attempt_id = c.id
+    ORDER BY c.created_at DESC LIMIT 20;'
+```
+
+An unresolved attempt can continue to hold an agent and borrower if the provider cannot confirm an outcome. The mocks use PostgreSQL as a separate provider ledger and place no real calls. Demo agents have an initial heartbeat only. Long manual pauses can cause them to go offline.
 
 ## Testing
 
@@ -55,7 +76,7 @@ The approval command prints a decision UUID and `requested 5, approved 5 (approv
 pytest -q
 ```
 
-The PostgreSQL tests create and drop their own schemas inside `TEST_DATABASE_URL`. Set it to a disposable database to run the full suite, including the worker races and rollback checks in `tests/test_safety.py` and `tests/test_allocation_concurrency.py`. If it is unset, pytest skips the database tests.
+The PostgreSQL tests create and drop their own schemas inside `TEST_DATABASE_URL`. Set it to a disposable database to run the full suite. `tests/test_recovery.py` includes an actual subprocess exit after provider acceptance. `tests/test_events.py` covers duplicates, reordered events, and replay around `ANSWERED`. If the URL is unset, pytest skips the database tests.
 
 ## Design documentation
 

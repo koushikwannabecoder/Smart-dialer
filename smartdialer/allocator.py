@@ -42,6 +42,7 @@ class Allocator:
         campaign_id: UUID,
         limit: int,
         now: datetime,
+        provider: str = DEFAULT_PROVIDER,
     ) -> int:
         """Reserve pairs and enqueue jobs inside the Safety Controller transaction."""
         if connection.info.transaction_status != TransactionStatus.INTRANS:
@@ -86,7 +87,7 @@ class Allocator:
                 """,
                 (
                     attempt_id, campaign_id, agent_id, borrower_id, now, now,
-                    decision_id, DEFAULT_PROVIDER, str(attempt_id), now,
+                    decision_id, provider, str(attempt_id), now,
                 ),
             )
             connection.execute(

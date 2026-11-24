@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import psycopg
@@ -7,6 +8,8 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from smartdialer.db import migrate
+from smartdialer.pacing import PaceRequest
+from smartdialer.safety import SafetyController
 
 
 @pytest.fixture
@@ -55,3 +58,30 @@ def make_campaign(approval_db):
         return campaign_id
 
     return create
+
+
+@pytest.fixture
+def clock():
+    class ManualClock:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def __call__(self):
+            return self.now
+
+        def advance(self, seconds):
+            self.now += timedelta(seconds=seconds)
+
+    return ManualClock()
+
+
+@pytest.fixture
+def queue_calls(approval_db, make_campaign, clock):
+    def queue(*, agents=1, provider="mock_fast"):
+        campaign_id = make_campaign(clock(), agents=agents, borrowers=agents)
+        with psycopg.connect(approval_db) as connection:
+            connection.execute("UPDATE campaigns SET provider = %s WHERE id = %s", (provider, campaign_id))
+        request = PaceRequest(uuid4(), campaign_id, "progressive", agents)
+        assert SafetyController(approval_db).approve(request, now=clock()).approved_count == agents
+        return campaign_id
+
+    return queue

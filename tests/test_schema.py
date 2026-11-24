@@ -51,10 +51,10 @@ def insert_attempt(connection, campaign_id, agent_id, borrower_id, state="RESERV
 
 
 def test_clean_migration_and_repeat(test_dsn):
-    assert db.migrate(test_dsn) == [1, 2]
+    assert db.migrate(test_dsn) == [1, 2, 3]
     assert db.migrate(test_dsn) == []
     with psycopg.connect(test_dsn) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,)]
+        assert connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,)]
         campaign_id = insert_campaign(connection)
         agent_id = insert_agent(connection, campaign_id)
         borrower_id = insert_borrower(connection, campaign_id)
@@ -76,7 +76,7 @@ def test_upgrade_preserves_phase_one_attempt_without_queuing_it(test_dsn, tmp_pa
         borrower_id = insert_borrower(connection, campaign_id)
         insert_attempt(connection, campaign_id, agent_id, borrower_id, "UNKNOWN")
 
-    assert db.migrate(test_dsn) == [2]
+    assert db.migrate(test_dsn) == [2, 3]
     with psycopg.connect(test_dsn) as connection:
         assert connection.execute(
             "SELECT agent_id, borrower_id, state, decision_id, dispatch_status FROM call_attempts"

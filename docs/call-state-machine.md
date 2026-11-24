@@ -1,6 +1,6 @@
 # Call state machine
 
-An eligible borrower represents queued work. Phase 2 creates a `RESERVED` attempt when approval commits. The same transaction writes the decision, the agent and borrower reservation, and one `READY` job. If it rolls back, no attempt or job is visible. The attempt's dispatch status starts at `PENDING`. The worker and event handler will drive the dispatch and recovery edges in later phases.
+An eligible borrower represents queued work. Approval creates a `RESERVED` attempt and a `READY` job in the same transaction. The worker commits `DISPATCHING` and `dispatch_started_at`, then calls the provider. A provider outcome or callback supplies separate evidence of acceptance.
 
 ```mermaid
 stateDiagram-v2
@@ -37,6 +37,6 @@ The diagram shows the normal and recovery paths. The validator also allows a val
 | `ANSWERED` | `COMPLETED`, `FAILED`, `CANCELLED` |
 | `CONNECTED` | `FAILED`, `CANCELLED` |
 
-A timeout can mean that the provider already created the call. The planned worker keeps both reservations, looks up the same key, and waits for authoritative evidence. A retry also requires a fresh safety check. A confirmed cancellation must prevent a late start for the cancelled key before the worker releases ownership.
+A timeout can mean that the provider already created the call. The worker keeps both reservations, looks up the same key, and backs off while the answer is unclear. A retry requires authoritative absence, agent eligibility, and an open provider circuit. An expired lease gives another worker a turn at reconciliation. Only definitive termination releases ownership. Provider cancellation seals the key against a delayed start.
 
-The event handler will treat repeated `ANSWERED` deliveries as one state change. If `COMPLETED` arrives before `ANSWERED` and `RINGING`, the attempt stays completed and the later deliveries can only enrich its history. After a crash following `ANSWERED`, replay will resume from persisted evidence. The transition validator rejects backward edges, self-transitions, and all transitions out of terminal states. Event handling will recognize duplicates and apply them as no-ops before invoking the validator.
+Repeated `ANSWERED` deliveries have one effective state change even when provider event IDs differ. If `COMPLETED` arrives before `ANSWERED` and `RINGING`, the attempt stays completed. Earlier facts may enrich its history. After a crash following `ANSWERED`, replay resumes from the inbox or from the already committed answer. Terminal handling closes the job and updates ownership once. A cancellation proven to precede provider acceptance returns the borrower to the queue, while a definitively attempted borrower becomes `done`.

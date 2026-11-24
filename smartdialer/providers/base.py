@@ -28,6 +28,8 @@ class ProviderResult:
     outcome: ProviderOutcome
     provider_call_id: str | None = None
     observed_state: ProviderEventType | None = None
+    occurred_at: datetime | None = None
+    accepted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,3 +57,9 @@ class Provider(Protocol):
     def cancel(self, key: str) -> ProviderResult:
         """CANCELLED confirms the call is stopped and a late start cannot reuse the key."""
         ...
+
+
+class EventSource(Protocol):
+    def poll_events(self, limit: int) -> list[ProviderEvent]: ...
+
+    def ack_event(self, event_id: str) -> None: ...
